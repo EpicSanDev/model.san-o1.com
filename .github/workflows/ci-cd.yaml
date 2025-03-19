@@ -46,6 +46,11 @@ jobs:
         run: npx prisma generate
 
       - name: Configuration du cache Docker
+        run: |
+          # Création du répertoire de cache s'il n'existe pas
+          mkdir -p /tmp/.buildx-cache
+        
+      - name: Utilisation du cache Docker
         uses: actions/cache@v3
         with:
           path: /tmp/.buildx-cache

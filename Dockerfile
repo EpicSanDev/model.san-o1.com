@@ -16,6 +16,9 @@ RUN npm ci
 # Copier les sources de l'application
 COPY . .
 
+# Créer le dossier public s'il n'existe pas
+RUN mkdir -p public
+
 # Générer le fichier prisma client
 RUN npx prisma generate
 
