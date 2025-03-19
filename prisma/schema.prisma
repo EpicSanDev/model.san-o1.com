@@ -1,0 +1,121 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = "file:./dev.db"
+}
+
+model User {
+  id            String          @id @default(uuid())
+  name          String?
+  email         String?         @unique
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+  Memory        Memory[]
+  Setting       Setting[]
+  ModuleUser    ModuleUser[]
+  CalendarEvent CalendarEvent[]
+  // OAuth fields for Google Calendar
+  googleId      String?         @unique
+  googleToken   String?         // Access token for Google API
+  googleRefreshToken String?    // Refresh token for Google API
+  googleTokenExpiry DateTime?   // Token expiry date
+}
+
+model Memory {
+  id        String   @id @default(uuid())
+  content   String
+  type      String   @default("general") // general, preference, reminder, etc.
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  vectorId  String?  // ID in Pinecone for vector search
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Conversation {
+  id        String   @id @default(uuid())
+  title     String?
+  messages  Json // Array of messages with roles and content
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Setting {
+  id        String   @id @default(uuid())
+  key       String
+  value     String
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, key])
+}
+
+// Nouveau modèle pour les modules
+model Module {
+  id                String        @id @default(uuid())
+  name              String
+  description       String
+  enabled           Boolean       @default(false)
+  icon              String?
+  settings          String?       // JSON string of module settings
+  requiredPermissions String?     // JSON array of required permissions
+  version           String        @default("1.0.0")
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+  ModuleUser        ModuleUser[]
+  ModuleAction      ModuleAction[]
+}
+
+// Relation entre module et utilisateur (pour préférences spécifiques)
+model ModuleUser {
+  id        String   @id @default(uuid())
+  moduleId  String
+  userId    String
+  enabled   Boolean  @default(true)
+  settings  String?  // JSON string of user-specific module settings
+  module    Module   @relation(fields: [moduleId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([moduleId, userId])
+}
+
+// Historique des actions des modules
+model ModuleAction {
+  id        String   @id @default(uuid())
+  moduleId  String
+  action    String
+  parameters String?  // JSON string of action parameters
+  result    String?  // JSON string of action result
+  success   Boolean
+  module    Module   @relation(fields: [moduleId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+}
+
+// Modèle pour les événements du calendrier
+model CalendarEvent {
+  id          String   @id @default(uuid())
+  title       String
+  start       DateTime
+  end         DateTime
+  description String?
+  location    String?
+  isAllDay    Boolean  @default(false)
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // Google Calendar specific fields
+  googleEventId String? @unique  // ID de l'événement dans Google Calendar
+  googleCalendarId String? // ID du calendrier Google (primary par défaut)
+  synced      Boolean  @default(false) // Indique si l'événement est synchronisé avec Google
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+} 

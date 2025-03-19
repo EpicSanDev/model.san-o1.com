@@ -1,0 +1,171 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: assistant-vocal
+  labels:
+    app: assistant-vocal
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: assistant-vocal
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: assistant-vocal
+    spec:
+      containers:
+      - name: assistant-vocal
+        image: ${DOCKER_REGISTRY}/assistant-vocal:${VERSION}
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 3000
+        resources:
+          requests:
+            cpu: "200m"
+            memory: "512Mi"
+          limits:
+            cpu: "1000m"
+            memory: "1Gi"
+        env:
+        - name: NODE_ENV
+          value: "production"
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: assistant-vocal-secrets
+              key: database-url
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: assistant-vocal-secrets
+              key: openai-api-key
+        - name: PINECONE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: assistant-vocal-secrets
+              key: pinecone-api-key
+        - name: PINECONE_ENVIRONMENT
+          valueFrom:
+            secretKeyRef:
+              name: assistant-vocal-secrets
+              key: pinecone-environment
+        - name: PINECONE_INDEX
+          valueFrom:
+            secretKeyRef:
+              name: assistant-vocal-secrets
+              key: pinecone-index
+        - name: NEXTAUTH_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: assistant-vocal-secrets
+              key: nextauth-secret
+        - name: NEXTAUTH_URL
+          valueFrom:
+            secretKeyRef:
+              name: assistant-vocal-secrets
+              key: nextauth-url
+        - name: GOOGLE_CLIENT_ID
+          valueFrom:
+            secretKeyRef:
+              name: assistant-vocal-secrets
+              key: google-client-id
+        - name: GOOGLE_CLIENT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: assistant-vocal-secrets
+              key: google-client-secret
+        livenessProbe:
+          httpGet:
+            path: /api/health
+            port: 3000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /api/health
+            port: 3000
+          initialDelaySeconds: 5
+          periodSeconds: 5
+      imagePullSecrets:
+      - name: regcred
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: assistant-vocal
+  labels:
+    app: assistant-vocal
+spec:
+  selector:
+    app: assistant-vocal
+  ports:
+  - port: 80
+    targetPort: 3000
+  type: ClusterIP
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: assistant-vocal-ingress
+  annotations:
+    kubernetes.io/ingress.class: "nginx"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+spec:
+  tls:
+  - hosts:
+    - assistant.example.com
+    secretName: assistant-vocal-tls
+  rules:
+  - host: assistant.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: assistant-vocal
+            port:
+              number: 80
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: assistant-vocal-config
+data:
+  NODE_ENV: "production"
+  PINECONE_INDEX: "assistant-memory"
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: assistant-vocal-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: assistant-vocal
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80 

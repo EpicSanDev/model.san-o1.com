@@ -1,0 +1,151 @@
+name: CI/CD Pipeline pour Digital Ocean
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+env:
+  REGISTRY: registry.digitalocean.com
+  IMAGE_NAME: ${{ github.repository_owner }}/assistant-vocal
+  K8S_NAMESPACE: default
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Vérification du code
+        uses: actions/checkout@v3
+
+      - name: Installation de doctl
+        uses: digitalocean/action-doctl@v2
+        with:
+          token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+
+      - name: Configuration de kubectl
+        run: doctl kubernetes cluster kubeconfig save ${{ secrets.DO_CLUSTER_NAME }}
+
+      - name: Configuration des accès Docker Registry
+        run: |
+          doctl registry login
+          echo "${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}" | docker login ${{ env.REGISTRY }} -u ${{ secrets.DO_API_TOKEN_NAME }} --password-stdin
+
+      - name: Configuration de Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Installation des dépendances
+        run: npm ci
+
+      - name: Génération du client Prisma
+        run: npx prisma generate
+
+      - name: Exécution des tests
+        run: npm test
+
+      - name: Définition des variables de version
+        run: |
+          echo "VERSION=$(date +'%Y%m%d%H%M%S')-${GITHUB_SHA::8}" >> $GITHUB_ENV
+
+      - name: Construction de l'image Docker
+        run: |
+          docker build -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.VERSION }} -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest .
+
+      - name: Nettoyage des anciennes images sur le registry
+        run: |
+          # Récupération des images plus anciennes (sauf les 3 plus récentes)
+          IMAGES_TO_DELETE=$(doctl registry repository list-tags ${{ env.IMAGE_NAME }} --format Tag --no-header | sort -r | tail -n +4)
+          
+          # Suppression des anciennes images
+          if [ ! -z "$IMAGES_TO_DELETE" ]; then
+            for TAG in $IMAGES_TO_DELETE; do
+              echo "Suppression de l'image ${{ env.IMAGE_NAME }}:$TAG"
+              doctl registry repository delete-tag ${{ env.IMAGE_NAME }} $TAG --force
+            done
+          else
+            echo "Pas d'anciennes images à supprimer"
+          fi
+
+      - name: Publication de l'image Docker
+        run: |
+          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.VERSION }}
+          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+
+      - name: Vérification de l'existence du déploiement
+        id: check-deployment
+        run: |
+          if kubectl get deployment assistant-vocal -n ${{ env.K8S_NAMESPACE }} 2>/dev/null; then
+            echo "DEPLOYMENT_EXISTS=true" >> $GITHUB_ENV
+          else
+            echo "DEPLOYMENT_EXISTS=false" >> $GITHUB_ENV
+          fi
+
+      - name: Mise à jour des variables dans les fichiers Kubernetes
+        run: |
+          sed -i "s|\${DOCKER_REGISTRY}|${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}|g" kubernetes/deployment.yaml
+          sed -i "s|\${VERSION}|${{ env.VERSION }}|g" kubernetes/deployment.yaml
+
+      - name: Déploiement initial Kubernetes si nécessaire
+        if: env.DEPLOYMENT_EXISTS == 'false'
+        run: |
+          # Création de secret pour les accès au registry
+          kubectl create secret docker-registry regcred \
+            --docker-server=${{ env.REGISTRY }} \
+            --docker-username=${{ secrets.DO_API_TOKEN_NAME }} \
+            --docker-password=${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }} \
+            --docker-email=${{ secrets.DO_EMAIL }} \
+            -n ${{ env.K8S_NAMESPACE }} || true
+          
+          # Création du secret pour les variables d'environnement de l'application
+          kubectl create secret generic assistant-vocal-secrets \
+            --from-literal=database-url=${{ secrets.DATABASE_URL }} \
+            --from-literal=openai-api-key=${{ secrets.OPENAI_API_KEY }} \
+            --from-literal=pinecone-api-key=${{ secrets.PINECONE_API_KEY }} \
+            --from-literal=pinecone-environment=${{ secrets.PINECONE_ENVIRONMENT }} \
+            --from-literal=pinecone-index=${{ secrets.PINECONE_INDEX }} \
+            --from-literal=nextauth-secret=${{ secrets.NEXTAUTH_SECRET }} \
+            --from-literal=nextauth-url=${{ secrets.NEXTAUTH_URL }} \
+            --from-literal=google-client-id=${{ secrets.GOOGLE_CLIENT_ID }} \
+            --from-literal=google-client-secret=${{ secrets.GOOGLE_CLIENT_SECRET }} \
+            -n ${{ env.K8S_NAMESPACE }} || true
+          
+          # Déploiement des ressources Kubernetes
+          kubectl apply -f kubernetes/deployment.yaml -n ${{ env.K8S_NAMESPACE }}
+          
+          echo "Déploiement initial effectué"
+
+      - name: Mise à jour du déploiement si existant
+        if: env.DEPLOYMENT_EXISTS == 'true'
+        run: |
+          # Mise à jour des secrets si nécessaire
+          kubectl create secret generic assistant-vocal-secrets \
+            --from-literal=database-url=${{ secrets.DATABASE_URL }} \
+            --from-literal=openai-api-key=${{ secrets.OPENAI_API_KEY }} \
+            --from-literal=pinecone-api-key=${{ secrets.PINECONE_API_KEY }} \
+            --from-literal=pinecone-environment=${{ secrets.PINECONE_ENVIRONMENT }} \
+            --from-literal=pinecone-index=${{ secrets.PINECONE_INDEX }} \
+            --from-literal=nextauth-secret=${{ secrets.NEXTAUTH_SECRET }} \
+            --from-literal=nextauth-url=${{ secrets.NEXTAUTH_URL }} \
+            --from-literal=google-client-id=${{ secrets.GOOGLE_CLIENT_ID }} \
+            --from-literal=google-client-secret=${{ secrets.GOOGLE_CLIENT_SECRET }} \
+            -n ${{ env.K8S_NAMESPACE }} --dry-run=client -o yaml | kubectl apply -f -
+          
+          # Application des configurations mises à jour
+          kubectl apply -f kubernetes/deployment.yaml -n ${{ env.K8S_NAMESPACE }}
+          
+          # Redémarrage forcé pour s'assurer que la nouvelle image est utilisée
+          kubectl rollout restart deployment assistant-vocal -n ${{ env.K8S_NAMESPACE }}
+          
+          echo "Mise à jour du déploiement effectuée"
+
+      - name: Attente que le déploiement soit prêt
+        run: |
+          kubectl rollout status deployment/assistant-vocal -n ${{ env.K8S_NAMESPACE }} --timeout=300s
+          
+      - name: Nettoyage des images Docker locales
+        if: always()
+        run: |
+          docker rmi ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.VERSION }} || true
+          docker rmi ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest || true 
