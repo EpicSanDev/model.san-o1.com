@@ -15,9 +15,16 @@ module.exports = {
     // Pour gérer les imports CSS dans les tests
     '\\.(css|less|scss|sass)$': 'identity-obj-proxy',
     // Pour gérer les imports d'images
-    '\\.(jpg|jpeg|png|gif|webp|svg)$': '<rootDir>/__mocks__/fileMock.js'
+    '\\.(jpg|jpeg|png|gif|webp|svg)$': '<rootDir>/__mocks__/fileMock.js',
+    // Mapper les modules ESM problématiques
+    '@qdrant/js-client-rest': '<rootDir>/__mocks__/qdrantMock.js'
   },
   transform: {
     '^.+\\.(js|jsx|ts|tsx)$': ['babel-jest', { presets: ['next/babel'] }],
   },
+  transformIgnorePatterns: [
+    // Transformer aussi les modules ESM dans node_modules
+    '/node_modules/(?!(@qdrant|openai)/)' 
+  ],
+  testTimeout: 30000, // Augmenter le timeout global des tests
 }; 

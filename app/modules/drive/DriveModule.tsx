@@ -58,8 +58,12 @@ const DriveModule: React.FC<DriveModuleProps> = ({ isVisible }) => {
         params: { folderId }
       });
       
-      setFiles(response.data.files || []);
-      setFolders(response.data.folders || []);
+      // Mettre à jour l'état en une seule mise à jour groupée
+      const updatedFiles = response.data.files || [];
+      const updatedFolders = response.data.folders || [];
+      
+      setFiles(updatedFiles);
+      setFolders(updatedFolders);
       setCurrentFolder(folderId);
       
       // Mettre à jour le chemin de dossier
@@ -94,10 +98,45 @@ const DriveModule: React.FC<DriveModuleProps> = ({ isVisible }) => {
 
   // Charger les fichiers et dossiers au montage du composant
   useEffect(() => {
-    if (isVisible && isModuleEnabled('drive')) {
-      fetchFilesAndFolders(currentFolder);
-    }
-  }, [isVisible, isModuleEnabled]);
+    let isMounted = true;
+    
+    const loadFiles = async () => {
+      if (isVisible && isModuleEnabled('drive')) {
+        try {
+          setIsLoading(true);
+          setError(null);
+          
+          // Appel à l'API pour récupérer les fichiers et dossiers
+          const response = await axios.get('/api/modules/drive/files', {
+            params: { folderId: currentFolder }
+          });
+          
+          // Vérifier si le composant est toujours monté avant de mettre à jour l'état
+          if (isMounted) {
+            const updatedFiles = response.data.files || [];
+            const updatedFolders = response.data.folders || [];
+            
+            setFiles(updatedFiles);
+            setFolders(updatedFolders);
+            setIsLoading(false);
+          }
+        } catch (err) {
+          if (isMounted) {
+            console.error('Erreur lors de la récupération des fichiers:', err);
+            setError('Impossible de récupérer les fichiers. Veuillez vérifier votre connexion et vos autorisations.');
+            setIsLoading(false);
+          }
+        }
+      }
+    };
+    
+    loadFiles();
+    
+    // Nettoyer l'effet
+    return () => {
+      isMounted = false;
+    };
+  }, [isVisible, currentFolder, isModuleEnabled]);
 
   // Naviguer vers un dossier
   const navigateToFolder = (folderId: string) => {

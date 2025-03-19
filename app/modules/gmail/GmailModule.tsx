@@ -1,9 +1,10 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import { useAssistant } from '../../context/AssistantContext';
 import { useModules } from '../../context/ModulesContext';
+import { act } from 'react-dom/test-utils';
 
 interface Email {
   id: string;
@@ -45,19 +46,52 @@ const GmailModule: React.FC<GmailModuleProps> = ({ isVisible }) => {
       });
       
       setEmails(response.data);
+      setIsLoading(false);
     } catch (err) {
       console.error('Erreur lors de la récupération des emails:', err);
       setError('Impossible de récupérer les emails. Veuillez vérifier votre connexion et vos autorisations.');
-    } finally {
       setIsLoading(false);
     }
   };
 
   // Charger les emails au montage du composant et lors du changement de filtre
   useEffect(() => {
-    if (isVisible && isModuleEnabled('gmail')) {
-      fetchEmails();
-    }
+    let isMounted = true;
+    
+    const loadEmails = async () => {
+      if (isVisible && isModuleEnabled('gmail')) {
+        try {
+          setIsLoading(true);
+          setError(null);
+          
+          // Appel API à l'endpoint de récupération des emails
+          const response = await axios.get('/api/modules/gmail/emails', {
+            params: { filter: filterType }
+          });
+          
+          // Vérifier si le composant est toujours monté avant de mettre à jour l'état
+          if (isMounted) {
+            setEmails(response.data);
+            setIsLoading(false);
+          }
+        } catch (err) {
+          console.error('Erreur lors de la récupération des emails:', err);
+          
+          // Vérifier si le composant est toujours monté avant de mettre à jour l'état
+          if (isMounted) {
+            setError('Impossible de récupérer les emails. Veuillez vérifier votre connexion et vos autorisations.');
+            setIsLoading(false);
+          }
+        }
+      }
+    };
+    
+    loadEmails();
+    
+    // Nettoyer l'effet
+    return () => {
+      isMounted = false;
+    };
   }, [isVisible, filterType, isModuleEnabled]);
 
   const analyzeEmails = async () => {
