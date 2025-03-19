@@ -1,4 +1,4 @@
-import { PineconeClient } from '@pinecone-database/pinecone';
+import { QdrantClient } from '@qdrant/js-client-rest';
 import { PrismaClient } from '@prisma/client';
 import { OpenAIService } from './openai';
 
@@ -17,21 +17,43 @@ const prisma = new PrismaClient();
 
 // Classe pour gérer la mémoire vectorielle
 export class MemoryVectorStore {
-  private pinecone: PineconeClient;
+  private qdrant: QdrantClient;
   private openAIService: OpenAIService | null = null;
-  private indexName: string;
+  private collectionName: string;
+  private initialized: boolean = false;
 
   constructor() {
-    this.pinecone = new PineconeClient();
-    this.indexName = process.env.PINECONE_INDEX || 'assistant-memory';
+    // Initialiser le client Qdrant avec l'URL du service dans Kubernetes
+    this.qdrant = new QdrantClient({
+      url: process.env.QDRANT_URL || 'http://qdrant-service.default.svc.cluster.local:6333',
+    });
+    this.collectionName = process.env.QDRANT_COLLECTION || 'assistant-memory';
   }
 
-  // Initialiser la connexion à Pinecone
+  // Initialiser la connexion à Qdrant
   async initialize() {
-    await this.pinecone.init({
-      environment: process.env.PINECONE_ENVIRONMENT || '',
-      apiKey: process.env.PINECONE_API_KEY || '',
-    });
+    try {
+      // Vérifier si la collection existe déjà
+      const collections = await this.qdrant.getCollections();
+      const collectionExists = collections.collections.some(
+        (collection) => collection.name === this.collectionName
+      );
+
+      // Créer la collection si elle n'existe pas
+      if (!collectionExists) {
+        await this.qdrant.createCollection(this.collectionName, {
+          vectors: {
+            size: 1536, // Dimension pour les embeddings OpenAI (ajuster selon le modèle utilisé)
+            distance: 'Cosine',
+          },
+        });
+      }
+      
+      this.initialized = true;
+    } catch (error) {
+      console.error('Erreur lors de l\'initialisation de Qdrant:', error);
+      throw error;
+    }
   }
 
   // Setter pour l'instance OpenAIService (pour éviter la référence circulaire)
@@ -46,11 +68,12 @@ export class MemoryVectorStore {
         throw new Error('OpenAIService n\'est pas initialisé');
       }
 
+      if (!this.initialized) {
+        await this.initialize();
+      }
+
       // Créer l'embedding
       const embedding = await this.openAIService.createEmbedding(content);
-      
-      // Obtenir l'index Pinecone
-      const index = this.pinecone.Index(this.indexName);
       
       // Créer la mémoire dans la base de données
       const memory = await prisma.memory.create({
@@ -61,15 +84,20 @@ export class MemoryVectorStore {
         },
       });
       
-      // Créer le vecteur dans Pinecone
-      await index.upsert({
-        id: memory.id,
-        values: embedding,
-        metadata: {
-          content,
-          type,
-          memoryId: memory.id,
-        },
+      // Ajouter le vecteur dans Qdrant
+      await this.qdrant.upsert(this.collectionName, {
+        wait: true,
+        points: [
+          {
+            id: memory.id,
+            vector: embedding,
+            payload: {
+              content,
+              type,
+              memoryId: memory.id,
+            },
+          },
+        ],
       });
       
       // Mettre à jour la mémoire avec l'ID du vecteur
@@ -99,25 +127,26 @@ export class MemoryVectorStore {
         throw new Error('OpenAIService n\'est pas initialisé');
       }
 
+      if (!this.initialized) {
+        await this.initialize();
+      }
+
       // Créer l'embedding pour la requête
       const queryEmbedding = await this.openAIService.createEmbedding(query);
       
-      // Obtenir l'index Pinecone
-      const index = this.pinecone.Index(this.indexName);
-      
       // Rechercher les vecteurs similaires
-      const queryResult = await index.query({
+      const searchResult = await this.qdrant.search(this.collectionName, {
         vector: queryEmbedding,
-        topK: limit,
-        includeMetadata: true,
+        limit: limit,
+        with_payload: true,
       });
       
-      if (!queryResult.matches || queryResult.matches.length === 0) {
+      if (!searchResult || searchResult.length === 0) {
         return [];
       }
       
       // Récupérer les mémoires correspondantes depuis la base de données
-      const memoryIds = queryResult.matches.map((match) => match.id);
+      const memoryIds = searchResult.map((match) => match.id.toString());
       
       const memories = await prisma.memory.findMany({
         where: {
@@ -128,17 +157,21 @@ export class MemoryVectorStore {
       });
       
       // Trier les mémoires dans le même ordre que les résultats de la recherche
-      const sortedMemories = memoryIds.map((id) => {
-        const memory = memories.find((m) => m.id === id);
-        return memory ? {
-          id: memory.id,
-          content: memory.content,
-          type: memory.type,
-          vectorId: memory.vectorId || undefined,
-          createdAt: memory.createdAt,
-          updatedAt: memory.updatedAt,
-        } : null;
-      }).filter((m): m is Memory => m !== null);
+      const sortedMemories = memoryIds
+        .map((id) => {
+          const memory = memories.find((m) => m.id === id);
+          if (!memory) return null;
+          
+          return {
+            id: memory.id,
+            content: memory.content,
+            type: memory.type,
+            vectorId: memory.vectorId || undefined,
+            createdAt: memory.createdAt,
+            updatedAt: memory.updatedAt,
+          } as Memory;
+        })
+        .filter((m): m is Memory => m !== null);
       
       return sortedMemories;
     } catch (error) {
@@ -150,14 +183,20 @@ export class MemoryVectorStore {
   // Supprimer une mémoire
   async deleteMemory(memoryId: string): Promise<boolean> {
     try {
+      if (!this.initialized) {
+        await this.initialize();
+      }
+
       // Supprimer de la base de données
       await prisma.memory.delete({
         where: { id: memoryId },
       });
       
-      // Supprimer de Pinecone si un vectorId existe
-      const index = this.pinecone.Index(this.indexName);
-      await index.delete({ ids: [memoryId] });
+      // Supprimer de Qdrant
+      await this.qdrant.delete(this.collectionName, {
+        wait: true,
+        points: [memoryId],
+      });
       
       return true;
     } catch (error) {
@@ -173,6 +212,10 @@ export class MemoryVectorStore {
         throw new Error('OpenAIService n\'est pas initialisé');
       }
 
+      if (!this.initialized) {
+        await this.initialize();
+      }
+
       // Mettre à jour dans la base de données
       const updateData: { content: string; type?: string } = { content };
       if (type) updateData.type = type;
@@ -185,16 +228,20 @@ export class MemoryVectorStore {
       // Créer le nouvel embedding
       const newEmbedding = await this.openAIService.createEmbedding(content);
       
-      // Mettre à jour dans Pinecone
-      const index = this.pinecone.Index(this.indexName);
-      await index.upsert({
-        id: memoryId,
-        values: newEmbedding,
-        metadata: {
-          content,
-          type: updatedMemory.type,
-          memoryId: updatedMemory.id,
-        },
+      // Mettre à jour dans Qdrant
+      await this.qdrant.upsert(this.collectionName, {
+        wait: true,
+        points: [
+          {
+            id: memoryId,
+            vector: newEmbedding,
+            payload: {
+              content,
+              type: updatedMemory.type,
+              memoryId: updatedMemory.id,
+            },
+          },
+        ],
       });
       
       return {

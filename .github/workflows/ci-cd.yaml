@@ -3,6 +3,8 @@ name: CI/CD Pipeline pour Digital Ocean
 on:
   push:
     branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
   workflow_dispatch:
 
 env:
@@ -11,8 +13,54 @@ env:
   K8S_NAMESPACE: default
 
 jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Vérification du code
+        uses: actions/checkout@v3
+
+      - name: Configuration de Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Installation des dépendances
+        run: npm ci
+
+      - name: Vérification de la qualité du code
+        run: |
+          npx eslint . --ext .js,.jsx,.ts,.tsx || true
+          npx prettier --check . || true
+
+      - name: Génération du client Prisma
+        run: npx prisma generate
+
+      - name: Exécution des tests
+        run: npm test
+
+  security-scan:
+    runs-on: ubuntu-latest
+    needs: lint-and-test
+    steps:
+      - name: Vérification du code
+        uses: actions/checkout@v3
+
+      - name: Audit des dépendances npm
+        run: npm audit --production
+
+      - name: Scan des vulnérabilités avec Trivy (optionnel)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          format: 'table'
+          exit-code: '0'
+          severity: 'CRITICAL,HIGH'
+          
   build-and-deploy:
     runs-on: ubuntu-latest
+    needs: [lint-and-test, security-scan]
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     steps:
       - name: Vérification du code
         uses: actions/checkout@v3
@@ -42,21 +90,41 @@ jobs:
       - name: Génération du client Prisma
         run: npx prisma generate
 
-      - name: Exécution des tests
-        run: npm test
+      - name: Configuration du cache Docker
+        uses: actions/cache@v3
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-
+
+      - name: Configuration de Docker Buildx
+        uses: docker/setup-buildx-action@v2
 
       - name: Définition des variables de version
         run: |
           echo "VERSION=$(date +'%Y%m%d%H%M%S')-${GITHUB_SHA::8}" >> $GITHUB_ENV
 
-      - name: Construction de l'image Docker
+      - name: Construction et publication de l'image Docker
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.VERSION }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to: type=local,dest=/tmp/.buildx-cache-new
+
+      - name: Déplacement du cache
         run: |
-          docker build -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.VERSION }} -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest .
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
 
       - name: Nettoyage des anciennes images sur le registry
         run: |
-          # Récupération des images plus anciennes (sauf les 3 plus récentes)
-          IMAGES_TO_DELETE=$(doctl registry repository list-tags ${{ env.IMAGE_NAME }} --format Tag --no-header | sort -r | tail -n +4)
+          # Récupération des images plus anciennes (sauf les 5 plus récentes)
+          IMAGES_TO_DELETE=$(doctl registry repository list-tags ${{ env.IMAGE_NAME }} --format Tag --no-header | sort -r | tail -n +6)
           
           # Suppression des anciennes images
           if [ ! -z "$IMAGES_TO_DELETE" ]; then
@@ -67,11 +135,6 @@ jobs:
           else
             echo "Pas d'anciennes images à supprimer"
           fi
-
-      - name: Publication de l'image Docker
-        run: |
-          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.VERSION }}
-          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
 
       - name: Vérification de l'existence du déploiement
         id: check-deployment
@@ -84,56 +147,99 @@ jobs:
 
       - name: Mise à jour des variables dans les fichiers Kubernetes
         run: |
+          # Remplacer les variables dans le fichier deployment.yaml
           sed -i "s|\${DOCKER_REGISTRY}|${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}|g" kubernetes/deployment.yaml
           sed -i "s|\${VERSION}|${{ env.VERSION }}|g" kubernetes/deployment.yaml
+          
+          # Personnaliser le domaine dans ingress.yaml si DO_DOMAIN est défini
+          if [ -n "${{ secrets.DO_DOMAIN }}" ]; then
+            HOST="app"
+            DOMAIN="${{ secrets.DO_DOMAIN }}"
+            sed -i "s|app.votre-domaine.com|$HOST.$DOMAIN|g" kubernetes/ingress.yaml
+            echo "Domaine $HOST.$DOMAIN configuré dans ingress.yaml"
+          fi
 
-      - name: Déploiement initial Kubernetes si nécessaire
-        if: env.DEPLOYMENT_EXISTS == 'false'
+      - name: Configuration automatique de Qdrant
         run: |
-          # Création de secret pour les accès au registry
+          # Détection automatique des variables d'environnement Qdrant
+          QDRANT_API_KEY="${{ secrets.QDRANT_API_KEY || '' }}"
+          QDRANT_URL="${{ secrets.QDRANT_URL || '' }}"
+          QDRANT_COLLECTION="${{ secrets.QDRANT_COLLECTION || 'assistant-vocal-collection' }}"
+          
+          # Si les variables Qdrant ne sont pas définies, utiliser des valeurs par défaut pour un déploiement Qdrant local
+          if [ -z "$QDRANT_URL" ]; then
+            echo "Aucune URL Qdrant trouvée. Configuration d'un Qdrant local..."
+            
+            # Vérification si Qdrant est déjà déployé
+            if ! kubectl get deployment qdrant -n ${{ env.K8S_NAMESPACE }} 2>/dev/null; then
+              kubectl apply -f kubernetes/qdrant-deployment.yaml -n ${{ env.K8S_NAMESPACE }}
+              kubectl apply -f kubernetes/qdrant-service.yaml -n ${{ env.K8S_NAMESPACE }}
+              echo "Qdrant déployé automatiquement."
+            else
+              echo "Qdrant existe déjà dans le cluster."
+            fi
+            
+            # Définir l'URL Qdrant pour utilisation interne
+            QDRANT_URL="http://qdrant:6333"
+          fi
+          
+          # Stocker les variables d'environnement Qdrant pour les étapes suivantes
+          echo "QDRANT_API_KEY=$QDRANT_API_KEY" >> $GITHUB_ENV
+          echo "QDRANT_URL=$QDRANT_URL" >> $GITHUB_ENV
+          echo "QDRANT_COLLECTION=$QDRANT_COLLECTION" >> $GITHUB_ENV
+
+      - name: Configuration automatique des secrets
+        run: |
+          # Création du secret pour les accès au registry
           kubectl create secret docker-registry regcred \
             --docker-server=${{ env.REGISTRY }} \
             --docker-username=${{ secrets.DO_API_TOKEN_NAME }} \
             --docker-password=${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }} \
-            --docker-email=${{ secrets.DO_EMAIL }} \
-            -n ${{ env.K8S_NAMESPACE }} || true
+            --docker-email="${{ secrets.DO_EMAIL || format('{0}@users.noreply.github.com', github.actor) }}" \
+            -n ${{ env.K8S_NAMESPACE }} --dry-run=client -o yaml | kubectl apply -f -
           
+          # Génération d'un secret NextAuth aléatoire si non fourni
+          NEXTAUTH_SECRET="${{ secrets.NEXTAUTH_SECRET }}"
+          if [ -z "$NEXTAUTH_SECRET" ]; then
+            NEXTAUTH_SECRET=$(openssl rand -base64 32)
+            echo "NextAuth secret généré automatiquement"
+          fi
+          
+          # URL de l'application avec valeur par défaut
+          NEXTAUTH_URL="${{ secrets.NEXTAUTH_URL || 'http://localhost:3000' }}"
+          
+          # URL de base de données avec valeur par défaut
+          DATABASE_URL="${{ secrets.DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/assistant-vocal' }}"
+
           # Création du secret pour les variables d'environnement de l'application
           kubectl create secret generic assistant-vocal-secrets \
-            --from-literal=database-url=${{ secrets.DATABASE_URL }} \
-            --from-literal=openai-api-key=${{ secrets.OPENAI_API_KEY }} \
-            --from-literal=pinecone-api-key=${{ secrets.PINECONE_API_KEY }} \
-            --from-literal=pinecone-environment=${{ secrets.PINECONE_ENVIRONMENT }} \
-            --from-literal=pinecone-index=${{ secrets.PINECONE_INDEX }} \
-            --from-literal=nextauth-secret=${{ secrets.NEXTAUTH_SECRET }} \
-            --from-literal=nextauth-url=${{ secrets.NEXTAUTH_URL }} \
-            --from-literal=google-client-id=${{ secrets.GOOGLE_CLIENT_ID }} \
-            --from-literal=google-client-secret=${{ secrets.GOOGLE_CLIENT_SECRET }} \
-            -n ${{ env.K8S_NAMESPACE }} || true
-          
+            --from-literal=database-url="$DATABASE_URL" \
+            --from-literal=openai-api-key="${{ secrets.OPENAI_API_KEY }}" \
+            --from-literal=qdrant-api-key="${{ env.QDRANT_API_KEY }}" \
+            --from-literal=qdrant-url="${{ env.QDRANT_URL }}" \
+            --from-literal=qdrant-collection="${{ env.QDRANT_COLLECTION }}" \
+            --from-literal=nextauth-secret="$NEXTAUTH_SECRET" \
+            --from-literal=nextauth-url="$NEXTAUTH_URL" \
+            --from-literal=google-client-id="${{ secrets.GOOGLE_CLIENT_ID }}" \
+            --from-literal=google-client-secret="${{ secrets.GOOGLE_CLIENT_SECRET }}" \
+            -n ${{ env.K8S_NAMESPACE }} --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Déploiement initial Kubernetes si nécessaire
+        if: env.DEPLOYMENT_EXISTS == 'false'
+        run: |
           # Déploiement des ressources Kubernetes
           kubectl apply -f kubernetes/deployment.yaml -n ${{ env.K8S_NAMESPACE }}
-          
+          kubectl apply -f kubernetes/service.yaml -n ${{ env.K8S_NAMESPACE }}
+          kubectl apply -f kubernetes/ingress.yaml -n ${{ env.K8S_NAMESPACE }}
           echo "Déploiement initial effectué"
 
       - name: Mise à jour du déploiement si existant
         if: env.DEPLOYMENT_EXISTS == 'true'
         run: |
-          # Mise à jour des secrets si nécessaire
-          kubectl create secret generic assistant-vocal-secrets \
-            --from-literal=database-url=${{ secrets.DATABASE_URL }} \
-            --from-literal=openai-api-key=${{ secrets.OPENAI_API_KEY }} \
-            --from-literal=pinecone-api-key=${{ secrets.PINECONE_API_KEY }} \
-            --from-literal=pinecone-environment=${{ secrets.PINECONE_ENVIRONMENT }} \
-            --from-literal=pinecone-index=${{ secrets.PINECONE_INDEX }} \
-            --from-literal=nextauth-secret=${{ secrets.NEXTAUTH_SECRET }} \
-            --from-literal=nextauth-url=${{ secrets.NEXTAUTH_URL }} \
-            --from-literal=google-client-id=${{ secrets.GOOGLE_CLIENT_ID }} \
-            --from-literal=google-client-secret=${{ secrets.GOOGLE_CLIENT_SECRET }} \
-            -n ${{ env.K8S_NAMESPACE }} --dry-run=client -o yaml | kubectl apply -f -
-          
           # Application des configurations mises à jour
           kubectl apply -f kubernetes/deployment.yaml -n ${{ env.K8S_NAMESPACE }}
+          kubectl apply -f kubernetes/service.yaml -n ${{ env.K8S_NAMESPACE }}
+          kubectl apply -f kubernetes/ingress.yaml -n ${{ env.K8S_NAMESPACE }}
           
           # Redémarrage forcé pour s'assurer que la nouvelle image est utilisée
           kubectl rollout restart deployment assistant-vocal -n ${{ env.K8S_NAMESPACE }}
@@ -143,9 +249,74 @@ jobs:
       - name: Attente que le déploiement soit prêt
         run: |
           kubectl rollout status deployment/assistant-vocal -n ${{ env.K8S_NAMESPACE }} --timeout=300s
+
+      - name: Vérification de la santé du déploiement
+        run: |
+          # Vérifier si les pods sont en état "Running"
+          RUNNING_PODS=$(kubectl get pods -n ${{ env.K8S_NAMESPACE }} -l app=assistant-vocal -o jsonpath='{.items[*].status.phase}' | grep -c "Running" || echo "0")
+          TOTAL_PODS=$(kubectl get pods -n ${{ env.K8S_NAMESPACE }} -l app=assistant-vocal --no-headers | wc -l)
+          
+          if [ "$RUNNING_PODS" -eq "$TOTAL_PODS" ] && [ "$TOTAL_PODS" -gt 0 ]; then
+            echo "Tous les pods sont en état Running!"
+          else
+            echo "ATTENTION: Tous les pods ne sont pas en état Running."
+            kubectl get pods -n ${{ env.K8S_NAMESPACE }} -l app=assistant-vocal
+            # Ne pas échouer le workflow, mais signaler le problème
+            echo "::warning::Problème détecté avec le déploiement"
+          fi
+
+      - name: Configuration automatique du DNS
+        run: |
+          # Récupérer l'IP de l'ingress controller
+          INGRESS_IP=$(kubectl get service -n ingress-nginx ingress-nginx-controller -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+          
+          if [ -n "$INGRESS_IP" ]; then
+            echo "IP de l'ingress controller détectée: $INGRESS_IP"
+            
+            # Si DO_DNS_API_TOKEN et DO_DOMAIN sont définis, configurer automatiquement le DNS
+            if [ -n "${{ secrets.DO_DNS_API_TOKEN }}" ] && [ -n "${{ secrets.DO_DOMAIN }}" ]; then
+              HOST="app"
+              echo "Configuration du DNS pour $HOST.${{ secrets.DO_DOMAIN }} -> $INGRESS_IP"
+              
+              # Utiliser l'API DigitalOcean pour créer/mettre à jour l'enregistrement DNS
+              curl -X POST \
+                -H "Content-Type: application/json" \
+                -H "Authorization: Bearer ${{ secrets.DO_DNS_API_TOKEN }}" \
+                -d "{\"type\":\"A\",\"name\":\"$HOST\",\"data\":\"$INGRESS_IP\",\"ttl\":300}" \
+                "https://api.digitalocean.com/v2/domains/${{ secrets.DO_DOMAIN }}/records"
+              
+              echo "Configuration DNS terminée. L'application sera accessible à https://$HOST.${{ secrets.DO_DOMAIN }} une fois les certificats TLS générés."
+            else
+              echo "::warning::Secrets DO_DNS_API_TOKEN et/ou DO_DOMAIN non définis. Configuration DNS manuelle requise."
+              echo "Configurez manuellement votre DNS pour pointer vers $INGRESS_IP"
+            fi
+          else
+            echo "::warning::IP de l'ingress controller non détectée. Assurez-vous que l'ingress-nginx-controller est correctement déployé."
+          fi
           
       - name: Nettoyage des images Docker locales
         if: always()
         run: |
           docker rmi ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.VERSION }} || true
           docker rmi ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest || true 
+          
+  notify:
+    runs-on: ubuntu-latest
+    needs: build-and-deploy
+    if: always()
+    steps:
+      - name: Notification de succès
+        if: needs.build-and-deploy.result == 'success'
+        run: |
+          echo "Déploiement réussi!"
+          # Ajoutez ici une notification vers Slack, Discord, email, etc.
+          # Exemple avec curl pour webhook Slack:
+          # curl -X POST -H 'Content-type: application/json' --data '{"text":"✅ Déploiement réussi!"}' ${{ secrets.SLACK_WEBHOOK }}
+      
+      - name: Notification d'échec
+        if: needs.build-and-deploy.result == 'failure'
+        run: |
+          echo "Échec du déploiement!"
+          # Ajoutez ici une notification vers Slack, Discord, email, etc.
+          # Exemple avec curl pour webhook Slack:
+          # curl -X POST -H 'Content-type: application/json' --data '{"text":"❌ Échec du déploiement!"}' ${{ secrets.SLACK_WEBHOOK }} 

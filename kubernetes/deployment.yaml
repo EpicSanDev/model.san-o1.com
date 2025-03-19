@@ -5,7 +5,7 @@ metadata:
   labels:
     app: assistant-vocal
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app: assistant-vocal
@@ -21,20 +21,11 @@ spec:
     spec:
       containers:
       - name: assistant-vocal
-        image: ${DOCKER_REGISTRY}/assistant-vocal:${VERSION}
+        image: ${DOCKER_REGISTRY}:${VERSION}
         imagePullPolicy: Always
         ports:
         - containerPort: 3000
-        resources:
-          requests:
-            cpu: "200m"
-            memory: "512Mi"
-          limits:
-            cpu: "1000m"
-            memory: "1Gi"
         env:
-        - name: NODE_ENV
-          value: "production"
         - name: DATABASE_URL
           valueFrom:
             secretKeyRef:
@@ -45,21 +36,21 @@ spec:
             secretKeyRef:
               name: assistant-vocal-secrets
               key: openai-api-key
-        - name: PINECONE_API_KEY
+        - name: QDRANT_API_KEY
           valueFrom:
             secretKeyRef:
               name: assistant-vocal-secrets
-              key: pinecone-api-key
-        - name: PINECONE_ENVIRONMENT
+              key: qdrant-api-key
+        - name: QDRANT_URL
           valueFrom:
             secretKeyRef:
               name: assistant-vocal-secrets
-              key: pinecone-environment
-        - name: PINECONE_INDEX
+              key: qdrant-url
+        - name: QDRANT_COLLECTION
           valueFrom:
             secretKeyRef:
               name: assistant-vocal-secrets
-              key: pinecone-index
+              key: qdrant-collection
         - name: NEXTAUTH_SECRET
           valueFrom:
             secretKeyRef:
@@ -80,6 +71,13 @@ spec:
             secretKeyRef:
               name: assistant-vocal-secrets
               key: google-client-secret
+        resources:
+          limits:
+            cpu: "1"
+            memory: "1Gi"
+          requests:
+            cpu: "500m"
+            memory: "512Mi"
         livenessProbe:
           httpGet:
             path: /api/health

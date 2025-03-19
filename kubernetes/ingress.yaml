@@ -1,0 +1,23 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: assistant-vocal
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  rules:
+  - host: app.votre-domaine.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: assistant-vocal
+            port:
+              number: 80
+  tls:
+  - hosts:
+    - app.votre-domaine.com
+    secretName: assistant-vocal-tls 
