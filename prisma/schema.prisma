@@ -41,7 +41,7 @@ model Memory {
 model Conversation {
   id        String   @id @default(uuid())
   title     String?
-  messages  Json // Array of messages with roles and content
+  messages  String // JSON string of messages with roles and content
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
