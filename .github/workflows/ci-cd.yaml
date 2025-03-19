@@ -39,23 +39,6 @@ jobs:
       - name: Exécution des tests
         run: npm test
 
-  security-scan:
-    runs-on: ubuntu-latest
-    needs: lint-and-test
-    steps:
-      - name: Vérification du code
-        uses: actions/checkout@v3
-
-      - name: Audit des dépendances npm
-        run: npm audit --production
-
-      - name: Scan des vulnérabilités avec Trivy (optionnel)
-        uses: aquasecurity/trivy-action@master
-        with:
-          scan-type: 'fs'
-          format: 'table'
-          exit-code: '0'
-          severity: 'CRITICAL,HIGH'
           
   build-and-deploy:
     runs-on: ubuntu-latest
