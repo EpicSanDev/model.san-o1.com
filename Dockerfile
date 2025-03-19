@@ -1,6 +1,9 @@
 # Étape de construction
 FROM node:18-alpine AS builder
 
+# Installer les dépendances système nécessaires pour Prisma
+RUN apk add --no-cache openssl
+
 # Définir le répertoire de travail
 WORKDIR /app
 

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { SentimentAnalysisService } from '@/app/lib/sentimentAnalysis';
+import { SentimentAnalysisService } from '../../../lib/sentimentAnalysis';
 
 /**
  * Endpoint pour l'analyse d'intention d'un texte
