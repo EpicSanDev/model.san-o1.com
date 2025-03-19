@@ -1,3 +1,5 @@
+'use client';
+
 import React, { createContext, useState, useEffect, useContext, ReactNode } from 'react';
 
 // Type pour les modules

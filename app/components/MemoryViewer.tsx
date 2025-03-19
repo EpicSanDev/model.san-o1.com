@@ -24,7 +24,7 @@ const MemoryViewer: React.FC<MemoryViewerProps> = ({ memories }) => {
   const [editContent, setEditContent] = useState('');
 
   // Obtenir tous les types de mémoire uniques
-  const memoryTypes = [...new Set(memories.map(memory => memory.type))];
+  const memoryTypes = Array.from(new Set(memories.map(memory => memory.type)));
 
   // Filtrer les mémoires
   const filteredMemories = memories.filter(memory => {

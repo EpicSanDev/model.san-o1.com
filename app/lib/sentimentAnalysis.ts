@@ -1,10 +1,31 @@
-import { OpenAIService } from './openai';
+import OpenAI from 'openai';
 
-export interface SentimentAnalysisResult {
-  sentiment: 'positive' | 'negative' | 'neutral';
-  sentimentScore: number; // -1 à 1
-  dominantEmotions: string[];
-  confidence: number; // 0 à 1
+// Création d'une classe OpenAIService simplifiée pour l'analyse de sentiment
+class SimpleOpenAIService {
+  private openai: OpenAI;
+  
+  constructor() {
+    this.openai = new OpenAI({
+      apiKey: process.env.OPENAI_API_KEY || '',
+    });
+  }
+  
+  async generateText({ messages, temperature = 0.7, response_format }: { 
+    messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>;
+    temperature?: number;
+    response_format?: { type: string };
+  }) {
+    const completion = await this.openai.chat.completions.create({
+      model: 'gpt-4o',
+      messages,
+      temperature,
+      response_format,
+    });
+    
+    return {
+      text: completion.choices[0].message.content || ''
+    };
+  }
 }
 
 export interface IntentAnalysisResult {

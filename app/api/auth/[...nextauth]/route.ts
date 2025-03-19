@@ -1,11 +1,18 @@
-import NextAuth from 'next-auth';
+import NextAuth, { NextAuthOptions, Session } from 'next-auth';
 import GoogleProvider from 'next-auth/providers/google';
 import { PrismaAdapter } from '@auth/prisma-adapter';
 import { PrismaClient } from '@prisma/client';
 
+// Étendre l'interface Session de NextAuth pour inclure accessToken
+declare module 'next-auth' {
+  interface Session {
+    accessToken?: string;
+  }
+}
+
 const prisma = new PrismaClient();
 
-export const authOptions = {
+export const authOptions: NextAuthOptions = {
   adapter: PrismaAdapter(prisma),
   providers: [
     GoogleProvider({
@@ -27,13 +34,13 @@ export const authOptions = {
       if (account) {
         token.accessToken = account.access_token;
         token.refreshToken = account.refresh_token;
-        token.accessTokenExpires = account.expires_at * 1000;
+        token.accessTokenExpires = account.expires_at ? account.expires_at * 1000 : undefined;
       }
       return token;
     },
-    async session({ session, token }) {
+    async session({ session, token }: { session: Session, token: any }) {
       // Passez les tokens à la session client
-      session.accessToken = token.accessToken;
+      session.accessToken = token.accessToken as string;
       return session;
     }
   },

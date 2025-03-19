@@ -1,6 +1,23 @@
 import { NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
-import { processWithAI } from '../../../../lib/openai';
+import OpenAI from 'openai';
+
+// Fonction locale pour traiter avec l'API OpenAI
+async function processWithAI(prompt: string, model: string = 'gpt-4o'): Promise<string> {
+  const openai = new OpenAI({
+    apiKey: process.env.OPENAI_API_KEY || '',
+  });
+  
+  const completion = await openai.chat.completions.create({
+    model,
+    messages: [
+      { role: 'system', content: 'Vous êtes un assistant intelligent qui analyse des données.' },
+      { role: 'user', content: prompt }
+    ],
+  });
+  
+  return completion.choices[0].message.content || '';
+}
 
 export async function POST(request: Request) {
   try {
